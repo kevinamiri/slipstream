@@ -1,0 +1,9 @@
+*
+!certs/
+!extern/
+!include/
+!src/
+!subprojects/
+!meson.build
+!meson.options
+!meson_options.txt

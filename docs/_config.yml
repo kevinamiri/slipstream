@@ -1,0 +1,12 @@
+title: slipstream
+email: jop-zitman@hotmail.com@hotmail.com
+description: >-
+  High-performance multi-path covert channel over DNS.
+baseurl: "/slipstream" # the subpath of your site, e.g. /blog
+url: "https://endpositive.github.io" # the base hostname & protocol for your site, e.g. http://example.com
+twitter_username: jekyllrb
+github_username: jekyll
+
+remote_theme: just-the-docs/just-the-docs
+plugins:
+  - jekyll-remote-theme
