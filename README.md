@@ -1,4 +1,8 @@
-# Slipstream fork (DNS over QUIC over shadowsocks)
+# A Slipstream fork/extension (DNS over QUIC over shadowsocks)
+
+What problem does it solve?
+- Tunnel traffic is encrypted using Shadowsocks
+- More stable than dnstt.
 
 Install build dependencies (Ubuntu/Debian).
 
@@ -75,8 +79,8 @@ iptables -t nat -I PREROUTING -i ens5 -p udp --dport 53 -j REDIRECT --to-ports 8
 
 
 Client side service:
+Create a folder named `slipstream` in your home directory and place the `slipstream-client-1.9` binary inside it:
 
-create a folder inside home directory called slipstream and put the slipstream-client-1.9 inside it.
 
 ```bash
 [Unit]
@@ -94,8 +98,47 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 ```
+- `slipstream-client-1.9` is the binary build of the Slipstream client.
+- `8.8.8.8` and `8.8.4.4` are the DNS resolvers to use. It can be many as you want.
+- `ns.fzserver.com` is the NS domain name of the Slipstream server.
+- `7000` is the port of the shadowsocks server.
 
+On xtls:
 
+```json
+{
+  "protocol": "shadowsocks",
+  "settings": {
+    "servers": [
+      {
+        "address": "127.0.0.1",
+        "port": 7000,
+        "password": "your_password",
+        "method": "2022-blake3-aes-256-gcm",
+        "uot": true
+      }
+    ]
+  },
+  "tag": "xh6jn0dd",
+  "streamSettings": {
+    "network": "tcp",
+    "security": "none",
+    "tcpSettings": {
+      "header": {
+        "type": "none"
+      }
+    }
+  },
+  "mux": {
+    "enabled": true,
+    "concurrency": 8,
+    "xudpConcurrency": 16,
+    "xudpProxyUDP443": "allow"
+  }
+}
+```
+
+127.0.0.1:7000 is the outbound port of the shadowsocks server.
 
 
 ---
@@ -103,20 +146,20 @@ WantedBy=multi-user.target
 **What has changed**
 
 1. Fixed the assertion crash in SPCDNS:
-- Changed class assertion in [codec.c](/home/slipstream/extern/SPCDNS/src/codec.c:379) from `<= 4` to `<= 65535`.
+- Changed class assertion in [codec.c](extern/SPCDNS/src/codec.c:379) from `<= 4` to `<= 65535`.
 - This prevents aborting when non-`IN/CH/HS/CS` class queries are re-encoded.
 
 2. Added defensive DNS class filtering in server decode:
-- In [slipstream_server.c](/home/slipstream/src/slipstream_server.c:156), queries with class other than `CLASS_IN` are now refused (`RCODE_REFUSED`) early.
+- In [slipstream_server.c](src/slipstream_server.c:156), queries with class other than `CLASS_IN` are now refused (`RCODE_REFUSED`) early.
 - This avoids feeding unsupported classes into the rest of the pipeline.
 
 3. Hardened fd/pipe lifecycle to reduce `Bad file descriptor` noise:
-- Initialized stream descriptors to `-1` in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:222).
-- Closed `fd`, `pipefd[0]`, and `pipefd[1]` safely in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:265).
-- Replaced noisy `printf` on `POLLNVAL` with debug log in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:390).
-- Closed socket on `connect()` failure in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:438).
-- Treated `EPIPE/EBADF/ECONNRESET` on send as normal teardown in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:472).
-- On stream FIN, close socket/pipe safely in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:588).
+- Initialized stream descriptors to `-1` in [slipstream_server.c](src/slipstream_server.c:222).
+- Closed `fd`, `pipefd[0]`, and `pipefd[1]` safely in [slipstream_server.c](src/slipstream_server.c:265).
+- Replaced noisy `printf` on `POLLNVAL` with debug log in [slipstream_server.c](src/slipstream_server.c:390).
+- Closed socket on `connect()` failure in [slipstream_server.c](src/slipstream_server.c:438).
+- Treated `EPIPE/EBADF/ECONNRESET` on send as normal teardown in [slipstream_server.c](src/slipstream_server.c:472).
+- On stream FIN, close socket/pipe safely in [slipstream_server.c](src/slipstream_server.c:588).
 
 
 ----
