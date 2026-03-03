@@ -1,5 +1,38 @@
 # Slipstream fork (DNS over QUIC over shadowsocks)
 
+Install build dependencies (Ubuntu/Debian).
+
+Only tested on Ubuntu 24.04
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  python3-pip cmake git pkg-config libssl-dev ninja-build gcc g++
+python3 -m pip install --user meson
+```
+
+### Configure and build
+
+```bash
+~/.local/bin/meson setup build
+~/.local/bin/meson compile -C build
+```
+
+For optimized release binaries:
+
+```bash
+~/.local/bin/meson setup --buildtype=release -Db_lto=true --warnlevel=0 build-release
+~/.local/bin/meson compile -C build-release
+```
+
+### Verify binaries
+
+```bash
+./build/slipstream-server --help
+./build/slipstream-client --help
+```
+
+
 
 DNS server:
 ```bash
@@ -7,11 +40,41 @@ ns.fzserver.com A record to [server ip]
 ns.fzserver.com NS record to ns.fzserver.com
 ```
 
+server side service:
+
+```bash
+[Unit]
+Description=Slipstream DNS Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/slipstream
+ExecStart=/home/slipstream/build/slipstream-server --dns-listen-port=8853 --target-address=127.0.0.1:9090 --domain=ns.fzserver.com
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+`9090` is the port of the Shadowsocks server running on the same machine. Slipstream tunnels traffic to this local Shadowsocks instance, which then handles the actual proxy connection.
+- `8853` is the port of the Slipstream server.
+- `ns.fzserver.com` is the NS domain name of the Slipstream server.
+- `127.0.0.1` is the IP address of the machine running the Shadowsocks server.
 
 
+## Iptables:
+
+```bash
+iptables -I INPUT -p udp --dport 8853 -j ACCEPT
+iptables -t nat -I PREROUTING -i ens5 -p udp --dport 53 -j REDIRECT --to-ports 8853
+```
+
+`ens5` is the network interface name of the machine.
 
 
-
+Client side service:
 
 create a folder inside home directory called slipstream and put the slipstream-client-1.9 inside it.
 
@@ -35,9 +98,28 @@ WantedBy=multi-user.target
 
 
 
+---
+
+**What has changed**
+
+1. Fixed the assertion crash in SPCDNS:
+- Changed class assertion in [codec.c](/home/slipstream/extern/SPCDNS/src/codec.c:379) from `<= 4` to `<= 65535`.
+- This prevents aborting when non-`IN/CH/HS/CS` class queries are re-encoded.
+
+2. Added defensive DNS class filtering in server decode:
+- In [slipstream_server.c](/home/slipstream/src/slipstream_server.c:156), queries with class other than `CLASS_IN` are now refused (`RCODE_REFUSED`) early.
+- This avoids feeding unsupported classes into the rest of the pipeline.
+
+3. Hardened fd/pipe lifecycle to reduce `Bad file descriptor` noise:
+- Initialized stream descriptors to `-1` in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:222).
+- Closed `fd`, `pipefd[0]`, and `pipefd[1]` safely in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:265).
+- Replaced noisy `printf` on `POLLNVAL` with debug log in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:390).
+- Closed socket on `connect()` failure in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:438).
+- Treated `EPIPE/EBADF/ECONNRESET` on send as normal teardown in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:472).
+- On stream FIN, close socket/pipe safely in [slipstream_server.c](/home/slipstream/src/slipstream_server.c:588).
 
 
-
+----
 
 
 
