@@ -143,6 +143,82 @@ On xtls:
 
 ---
 
+
+## DEV NOTE
+
+
+2026-03-04
+Implemented a patch in [`src/slipstream_server.c`](src/slipstream_server.c) to address the RAM growth causes.
+
+What changed:
+- Added server-side `waiting_for_readable` guard on stream context to prevent repeated poller thread creation for the same stream.
+- Reset `waiting_for_readable` in poller wake/exit paths so it can be re-armed safely.
+- Fixed heap leak in `slipstream_io_copy`: `slipstream_io_copy_args` is now always freed on all exits.
+- Hardened idle-socket check (`recv(MSG_PEEK)`) to only treat `EAGAIN/EWOULDBLOCK` when `recv < 0` and avoid stale `errno`.
+- Fixed use-after-free risk on connection close callback by caching `thread_ctx` before freeing `server_ctx`.
+- Freed `server_domain_name` during server shutdown.
+
+Validation:
+- Under stress, thread count still rises during active concurrent streams (expected), but returns to baseline after connections close.
+- Temporary test processes were cleaned up.
+
+Important for your service:
+- Your systemd unit runs `/usr/local/bin/slipstream-server`, not `./build/slipstream-server`.
+- Rebuild/install/deploy the updated binary, then restart service:
+1. install updated binary to `/usr/local/bin/slipstream-server`
+2. `sudo systemctl restart slipstream-server`
+3. monitor with `ps -L -p <pid> ...` and RSS over time to confirm improvement
+
+```bash
+# 1) Get the server PID
+PID=$(pgrep -f '/usr/local/bin/slipstream-server' | head -n1)
+echo "$PID"
+```
+
+```bash
+# 2) One-time snapshot of all threads in that process
+ps -L -p "$PID" -o pid,tid,stat,pcpu,pmem,rss,vsz,wchan:30,comm
+```
+
+```bash
+# 3) Live monitoring every 2s
+watch -n 2 "ps -p $PID -o pid,nlwp,rss,vsz,%cpu,%mem,etime,cmd --no-headers; echo; ps -L -p $PID -o tid,stat,wchan:30 --no-headers | head -n 40"
+```
+
+What to watch:
+- `nlwp` = thread count
+- `rss` = resident RAM (KB)
+- `wchan` = where threads are blocked (useful for leak/thread buildup patterns)
+
+If it’s a systemd service, you can also get PID with:
+```bash
+systemctl show -p MainPID --value slipstream-server
+```
+#### Deploy the updated binary to production
+From project root (`/home/slipstream`), do:
+
+```bash
+sudo install -m 0755 ./build/slipstream-server /usr/local/bin/slipstream-server
+```
+
+If you want a backup first:
+
+```bash
+sudo cp /usr/local/bin/slipstream-server /usr/local/bin/slipstream-server.bak
+sudo install -m 0755 ./build/slipstream-server /usr/local/bin/slipstream-server
+```
+
+Then restart:
+
+```bash
+sudo systemctl restart slipstream-server
+sudo systemctl status slipstream-server --no-pager
+```
+
+
+---
+
+2026-03-03
 **What has changed**
 
 1. Fixed the assertion crash in SPCDNS:
@@ -160,6 +236,7 @@ On xtls:
 - Closed socket on `connect()` failure in [slipstream_server.c](src/slipstream_server.c:438).
 - Treated `EPIPE/EBADF/ECONNRESET` on send as normal teardown in [slipstream_server.c](src/slipstream_server.c:472).
 - On stream FIN, close socket/pipe safely in [slipstream_server.c](src/slipstream_server.c:588).
+
 
 
 ----
