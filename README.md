@@ -141,6 +141,13 @@ On xtls:
 127.0.0.1:7000 is the outbound port of the shadowsocks server.
 
 
+Add more DNS resolvers will add more speed.
+
+```bash
+./slipstream-client --resolver=8.8.8.8:53 --resolver=8.8.4.4:53 --resolver=9.9.9.9:53 --resolver=149.112.112.112:53 --resolver=4.2.2.1:53 --resolver=4.2.2.2:53 --resolver=4.2.2.3:53 --resolver=4.2.2.4:53 --resolver=4.2.2.5:53 --resolver=4.2.2.6:53 --resolver=208.67.222.222:53 --resolver=208.67.220.220:53 --resolver=64.6.64.6:53 --resolver=64.6.65.6:53 --resolver=156.154.70.1:53 --resolver=156.154.71.1:53 --resolver=129.250.35.250:53 --resolver=129.250.35.251:53 --resolver=223.5.5.5:53 --resolver=223.6.6.6:53 --resolver=119.29.29.29:53 --resolver=182.254.116.116:53 --resolver=180.76.76.76:53 --resolver=77.88.8.8:53 --resolver=77.88.8.1:53 --resolver=94.140.14.14:53 --resolver=94.140.15.15:53 --resolver=84.200.69.80:53 --resolver=84.200.70.40:53 --resolver=185.228.168.9:53 --resolver=185.228.169.9:53 --resolver=74.82.42.42:53 --resolver=66.220.18.42:53 --resolver=75.75.75.75:53 --resolver=75.75.76.76:53 --resolver=68.94.156.1:53 --resolver=68.94.157.1:53 --domain=ns.fzserver.com --tcp-listen-port=7000
+```
+
+
 ---
 
 
