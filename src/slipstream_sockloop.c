@@ -133,8 +133,9 @@ int slipstream_packet_loop_(picoquic_network_thread_ctx_t* thread_ctx, picoquic_
             bytes_recv = param->decode(slot, thread_ctx->loop_callback_ctx, &decoded,
                 (const unsigned char*)buffer, bytes_recv, &peer_addr, &local_addr);
             if (bytes_recv < 0) {
-                DBG_PRINTF("decode() failed with error %d\n", bytes_recv);
-                return bytes_recv;
+                /* Malformed or undecodable packet: drop and keep loop alive. */
+                DBG_PRINTF("decode() failed with error %d, dropping packet\n", bytes_recv);
+                continue;
             }
 
             if (bytes_recv == 0) {

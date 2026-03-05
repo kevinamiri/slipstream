@@ -270,8 +270,6 @@ static void slipstream_client_free_stream_ctx(slipstream_client_ctx_t* client_ct
 
 static void slipstream_client_free_context(slipstream_client_ctx_t* client_ctx) {
     slipstream_client_stream_ctx_t* stream_ctx;
-
-    /* Delete any remaining stream context */
     while ((stream_ctx = client_ctx->first_stream) != NULL) {
         slipstream_client_free_stream_ctx(client_ctx, stream_ctx);
     }
@@ -341,7 +339,6 @@ int slipstream_client_sockloop_callback(picoquic_quic_t* quic, picoquic_packet_l
             slipstream_add_paths(client_ctx);
         }
         if (should_shutdown) {
-            // Iterate and close all connections
             picoquic_cnx_t* cnx = picoquic_get_first_cnx(quic);
             bool has_unclosed = false;
             while (cnx != NULL) {
@@ -350,7 +347,7 @@ int slipstream_client_sockloop_callback(picoquic_quic_t* quic, picoquic_packet_l
                     has_unclosed = true;
                 }
 
-                picoquic_close(cnx, 0); // 0 = no error, or use appropriate error code
+                picoquic_close(cnx, 0);
 
                 if (cnx->cnx_state == picoquic_state_draining) {
                     picoquic_connection_disconnect(cnx);

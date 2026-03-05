@@ -46,6 +46,7 @@ ns.fzserver.com NS record to ns.fzserver.com
 
 server side service:
 
+How to create a service like this that service will be restarted every 5 minutes?
 ```bash
 [Unit]
 Description=Slipstream DNS Server
@@ -62,6 +63,8 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 ```
+
+
 `9090` is the port of the Shadowsocks server running on the same machine. Slipstream tunnels traffic to this local Shadowsocks instance, which then handles the actual proxy connection.
 - `8853` is the port of the Slipstream server.
 - `ns.fzserver.com` is the NS domain name of the Slipstream server.
@@ -246,6 +249,52 @@ sudo systemctl status slipstream-server --no-pager
 
 
 
+----
+
+
+Configured and tested. `slipstream-server` now restarts every 5 minutes.
+
+./build/slipstream-client --tcp-listen-port 700 --resolver=4.2.2.1:53 --resolver=4.2.2.2:53 --resolver=8.8.4.4:53 --resolver=8.8.8.8:53 --resolver=4.2.2.3:53 --resolver=4.2.2.4:53 --resolver=4.2.2.5:53 --resolver=4.2.2.6:53 --domain ns.fzserver.com
+Starting connection to 4.2.2.1
+
+- Timer unit: [/etc/systemd/system/slipstream-server-restart.timer](/etc/systemd/system/slipstream-server-restart.timer)
+- Service unit: [/etc/systemd/system/slipstream-server-restart.service](/etc/systemd/system/slipstream-server-restart.service)
+
+Current status:
+- `slipstream-server-restart.timer` is `active (waiting)`
+- Next run is at the next 5-minute boundary.
+- Manual test succeeded: `MainPID` changed from `460496` to `465672`.
+
+Useful checks:
+```bash
+systemctl status slipstream-server-restart.timer --no-pager
+systemctl list-timers --all --no-pager | grep slipstream-server-restart
+journalctl -u slipstream-server-restart.service -f
+```
+
+If you want to stop this behavior later:
+```bash
+sudo systemctl disable --now slipstream-server-restart.timer
+```
+
+Edit the timer file and change `OnCalendar`.
+
+Current file: [/etc/systemd/system/slipstream-server-restart.timer](/etc/systemd/system/slipstream-server-restart.timer)
+
+Example values:
+- Every 2 minutes: `OnCalendar=*:0/2`
+- Every 10 minutes: `OnCalendar=*:0/10`
+- Every 15 minutes: `OnCalendar=*:0/15`
+
+Then reload and restart timer:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart slipstream-server-restart.timer
+systemctl status slipstream-server-restart.timer --no-pager
+```
+
+If you want, tell me the exact interval and I’ll set it now.
 ----
 
 

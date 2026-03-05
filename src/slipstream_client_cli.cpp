@@ -51,8 +51,6 @@ int main(int argc, char** argv) {
         std::cerr << "Client error: Missing required --resolver option (at least one required)" << std::endl;
         exit(1);
     }
-
-    // Process resolver addresses
     std::vector<st_address_t> resolver_addresses;
     bool ipv4 = false;
     bool ipv6 = false;
@@ -102,7 +100,6 @@ int main(int argc, char** argv) {
     }
 
     if (ipv4 && ipv6) {
-        // due to single param.local_af in slipstream_client.c
         std::cerr << "Cannot mix IPv4 and IPv6 resolver addresses" << std::endl;
         exit(1);
     }
