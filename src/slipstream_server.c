@@ -13,6 +13,7 @@
 #include <sys/param.h>
 #include <sys/poll.h>
 #include <stdatomic.h>
+#include <strings.h>
 #include <assert.h>
 #include <picoquic_internal.h>
 #include <slipstream_sockloop.h>
@@ -167,7 +168,24 @@ ssize_t server_decode(void* slot_p, void* callback_ctx, unsigned char** dest_buf
         return 0;
     }
 
-    const ssize_t data_len = strlen(question->name) - server_domain_name_len - 1 - 1;
+    const char* qname = question->name;
+    const size_t qname_len = strlen(qname);
+    if (qname_len < (server_domain_name_len + 2) || qname[qname_len - 1] != '.') {
+        slot->error = RCODE_NAME_ERROR;
+        return 0;
+    }
+
+    const size_t domain_start = qname_len - server_domain_name_len - 1;
+    if (domain_start == 0 || qname[domain_start - 1] != '.') {
+        slot->error = RCODE_NAME_ERROR;
+        return 0;
+    }
+    if (strncasecmp(qname + domain_start, server_domain_name, server_domain_name_len) != 0) {
+        slot->error = RCODE_NAME_ERROR;
+        return 0;
+    }
+
+    const ssize_t data_len = (ssize_t)domain_start - 1;
     if (data_len <= 0) {
         DBG_PRINTF("subdomain is empty", NULL);
         slot->error = RCODE_NAME_ERROR;
@@ -600,23 +618,37 @@ int slipstream_server_callback(picoquic_cnx_t* cnx,
         if (length > 0) {
             DBG_PRINTF("[stream_id=%d][leftover_length=%d]", stream_ctx->stream_id, length);
 
-            ssize_t bytes_sent = write(stream_ctx->pipefd[1], bytes, length);
-            DBG_PRINTF("[stream_id=%d][bytes_sent=%d]", stream_ctx->stream_id, bytes_sent);
-            if (bytes_sent < 0) {
-                if (errno == EPIPE) {
-                    /* Connection closed */
-                    DBG_PRINTF("[stream_id=%d] send: closed stream", stream_ctx->stream_id);
+            size_t remaining = length;
+            const uint8_t* p = bytes;
+            while (remaining > 0) {
+                ssize_t bytes_sent = write(stream_ctx->pipefd[1], p, remaining);
+                DBG_PRINTF("[stream_id=%d][bytes_sent=%d]", stream_ctx->stream_id, bytes_sent);
+                if (bytes_sent < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    if (errno == EPIPE) {
+                        /* Connection closed */
+                        DBG_PRINTF("[stream_id=%d] send: closed stream", stream_ctx->stream_id);
 
+                        (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR);
+                        return 0;
+                    }
+                    if (errno == EAGAIN) {
+                        /* TODO: this is bad because we don't have a way to backpressure */
+                    }
+
+                    DBG_PRINTF("[stream_id=%d] send: error: %s (%d)", stream_id, strerror(errno), errno);
+                    (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
+                    return 0;
+                }
+                if (bytes_sent == 0) {
+                    DBG_PRINTF("[stream_id=%d] send: closed stream", stream_ctx->stream_id);
                     (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR);
                     return 0;
                 }
-                if (errno == EAGAIN) {
-                    /* TODO: this is bad because we don't have a way to backpressure */
-                }
-
-                DBG_PRINTF("[stream_id=%d] send: error: %s (%d)", stream_id, strerror(errno), errno);
-                (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
-                return 0;
+                p += bytes_sent;
+                remaining -= (size_t)bytes_sent;
             }
         }
         if (fin_or_event == picoquic_callback_stream_fin) {

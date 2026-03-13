@@ -1,4 +1,16 @@
 # A Slipstream fork/extension (DNS over QUIC over shadowsocks)
+This app is a **DNS-tunneled TCP relay** built on top of **QUIC**.
+
+- The **client** listens on a local TCP port, accepts app connections, and forwards their bytes over QUIC streams.
+- Instead of normal QUIC packets on the wire, data is encoded into **DNS TXT query names** (base32 + dot formatting), sent to resolvers.
+- The **server** receives/decode those DNS queries, extracts payload, and relays traffic to an upstream TCP service.
+- Responses are encoded back into DNS answers and returned, so traffic flows both directions.
+
+Its purpose is to provide a **covert/obfuscated transport channel** for TCP traffic over DNS infrastructure, useful where direct network paths are restricted, monitored, or blocked.
+
+
+
+
 
 What problem does it solve?
 - Tunnel traffic is encrypted using Shadowsocks
@@ -221,6 +233,8 @@ sudo install -m 0755 ./build/slipstream-server /usr/local/bin/slipstream-server
 Then restart:
 
 ```bash
+sudo systemctl stop slipstream-server
+sudo systemctl start slipstream-server
 sudo systemctl restart slipstream-server
 sudo systemctl status slipstream-server --no-pager
 ```

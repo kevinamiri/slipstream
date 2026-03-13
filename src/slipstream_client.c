@@ -17,6 +17,7 @@
 #include <sys/param.h>
 #include <sys/poll.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 
 #include "lua-resty-base-encoding-base32.h"
 #include "picoquic_config.h"
@@ -39,8 +40,10 @@ typedef struct st_slipstream_client_stream_ctx_t {
     struct st_slipstream_client_stream_ctx_t* previous_stream;
     int fd;
     uint64_t stream_id;
-    volatile sig_atomic_t set_active;
-    volatile sig_atomic_t waiting_for_readable;
+    atomic_int ref_count;
+    atomic_bool closing;
+    atomic_bool set_active;
+    atomic_bool waiting_for_readable;
     uint32_t empty_disactivate_count;
 } slipstream_client_stream_ctx_t;
 
@@ -53,6 +56,7 @@ typedef struct st_slipstream_client_ctx_t {
     bool ready;
     bool closed;
     int listen_sock;
+    pthread_mutex_t stream_lock;
 } slipstream_client_ctx_t;
 
 char* client_domain_name = NULL;
@@ -70,6 +74,17 @@ static void client_log_stream_event(const slipstream_client_stream_ctx_t* stream
     }
 
     printf("[stream=%" PRIu64 " fd=%d] %s\n", stream_ctx->stream_id, stream_ctx->fd, event);
+}
+
+static void slipstream_client_stream_ctx_addref(slipstream_client_stream_ctx_t* stream_ctx) {
+    atomic_fetch_add_explicit(&stream_ctx->ref_count, 1, memory_order_relaxed);
+}
+
+static void slipstream_client_stream_ctx_release(slipstream_client_stream_ctx_t* stream_ctx) {
+    const int previous = atomic_fetch_sub_explicit(&stream_ctx->ref_count, 1, memory_order_acq_rel);
+    if (previous == 1) {
+        free(stream_ctx);
+    }
 }
 
 ssize_t client_encode_segment(dns_packet_t* packet, size_t* packet_len, const unsigned char* src_buf, size_t src_buf_len) {
@@ -143,15 +158,25 @@ ssize_t client_encode(void* slot_p, void* callback_ctx, unsigned char** dest_buf
     assert(false);
 #endif
 
-    size_t num_segments = src_buf_len / *segment_len;
+    const size_t base_segment_len = *segment_len;
+    size_t num_segments = src_buf_len / base_segment_len;
+    if ((src_buf_len % base_segment_len) != 0) {
+        num_segments++;
+    }
+
     unsigned char* packets = malloc(MAX_DNS_QUERY_SIZE * num_segments);
+    if (packets == NULL) {
+        return -1;
+    }
     unsigned char* current_packet = packets;
 
     const unsigned char* segment = src_buf;
     size_t first_packet_len = 0;
     for (size_t i = 0; i < num_segments; i++) {
+        const size_t remaining = src_buf_len - (size_t)(segment - src_buf);
+        const size_t current_segment_len = MIN(base_segment_len, remaining);
         size_t packet_len = MAX_DNS_QUERY_SIZE;
-        const ssize_t ret = client_encode_segment((dns_packet_t*) current_packet, &packet_len, segment, *segment_len);
+        const ssize_t ret = client_encode_segment((dns_packet_t*) current_packet, &packet_len, segment, current_segment_len);
         if (ret < 0) {
             free(packets);
             return -1;
@@ -168,7 +193,7 @@ ssize_t client_encode(void* slot_p, void* callback_ctx, unsigned char** dest_buf
         }
 
         current_packet += packet_len;
-        segment += *segment_len;
+        segment += current_segment_len;
     }
 
     *dest_buf = packets;
@@ -239,6 +264,13 @@ slipstream_client_stream_ctx_t* slipstream_client_create_stream_ctx(picoquic_cnx
     }
 
     memset(stream_ctx, 0, sizeof(slipstream_client_stream_ctx_t));
+
+    atomic_init(&stream_ctx->ref_count, 1);
+    atomic_init(&stream_ctx->closing, false);
+    atomic_init(&stream_ctx->set_active, false);
+    atomic_init(&stream_ctx->waiting_for_readable, false);
+
+    pthread_mutex_lock(&client_ctx->stream_lock);
     if (client_ctx->first_stream == NULL) {
         client_ctx->first_stream = stream_ctx;
     } else {
@@ -248,11 +280,12 @@ slipstream_client_stream_ctx_t* slipstream_client_create_stream_ctx(picoquic_cnx
     }
     stream_ctx->fd = sock_fd;
     stream_ctx->stream_id = -1;
+    pthread_mutex_unlock(&client_ctx->stream_lock);
 
     return stream_ctx;
 }
 
-static void slipstream_client_free_stream_ctx(slipstream_client_ctx_t* client_ctx, slipstream_client_stream_ctx_t* stream_ctx) {
+static void slipstream_client_unlink_stream_ctx_locked(slipstream_client_ctx_t* client_ctx, slipstream_client_stream_ctx_t* stream_ctx) {
     if (stream_ctx->previous_stream != NULL) {
         stream_ctx->previous_stream->next_stream = stream_ctx->next_stream;
     }
@@ -262,37 +295,65 @@ static void slipstream_client_free_stream_ctx(slipstream_client_ctx_t* client_ct
     if (client_ctx->first_stream == stream_ctx) {
         client_ctx->first_stream = stream_ctx->next_stream;
     }
+    stream_ctx->next_stream = NULL;
+    stream_ctx->previous_stream = NULL;
+}
 
-    stream_ctx->fd = close(stream_ctx->fd);
+static void slipstream_client_free_stream_ctx(slipstream_client_ctx_t* client_ctx, slipstream_client_stream_ctx_t* stream_ctx) {
+    pthread_mutex_lock(&client_ctx->stream_lock);
+    slipstream_client_unlink_stream_ctx_locked(client_ctx, stream_ctx);
+    atomic_store_explicit(&stream_ctx->closing, true, memory_order_release);
+    if (stream_ctx->fd >= 0) {
+        close(stream_ctx->fd);
+        stream_ctx->fd = -1;
+    }
+    pthread_mutex_unlock(&client_ctx->stream_lock);
 
-    free(stream_ctx);
+    slipstream_client_stream_ctx_release(stream_ctx);
 }
 
 static void slipstream_client_free_context(slipstream_client_ctx_t* client_ctx) {
-    slipstream_client_stream_ctx_t* stream_ctx;
-    while ((stream_ctx = client_ctx->first_stream) != NULL) {
+    while (1) {
+        pthread_mutex_lock(&client_ctx->stream_lock);
+        slipstream_client_stream_ctx_t* stream_ctx = client_ctx->first_stream;
+        pthread_mutex_unlock(&client_ctx->stream_lock);
+        if (stream_ctx == NULL) {
+            break;
+        }
         slipstream_client_free_stream_ctx(client_ctx, stream_ctx);
     }
 
-    free(client_ctx->server_addresses);
-
+    if (client_ctx->listen_sock >= 0) {
+        close(client_ctx->listen_sock);
+        client_ctx->listen_sock = -1;
+    }
     client_ctx->closed = true;
 }
 
 void slipstream_client_mark_active_pass(slipstream_client_ctx_t* client_ctx) {
-    slipstream_client_stream_ctx_t* stream_ctx = client_ctx->first_stream;
-
-    while (stream_ctx != NULL) {
-        if (stream_ctx->set_active) {
-            if (stream_ctx->stream_id == -1) {
-                stream_ctx->stream_id = picoquic_get_next_local_stream_id(client_ctx->cnx, 0);
-                client_log_stream_event(stream_ctx, "assigned stream id");
-            }
-            stream_ctx->set_active = 0;
-            client_log_stream_event(stream_ctx, "activate stream");
-            picoquic_mark_active_stream(client_ctx->cnx, stream_ctx->stream_id, 1, stream_ctx);
+    while (1) {
+        pthread_mutex_lock(&client_ctx->stream_lock);
+        slipstream_client_stream_ctx_t* stream_ctx = client_ctx->first_stream;
+        while (stream_ctx != NULL &&
+            !atomic_exchange_explicit(&stream_ctx->set_active, false, memory_order_acq_rel)) {
+            stream_ctx = stream_ctx->next_stream;
         }
-        stream_ctx = stream_ctx->next_stream;
+
+        if (stream_ctx == NULL) {
+            pthread_mutex_unlock(&client_ctx->stream_lock);
+            break;
+        }
+
+        if (stream_ctx->stream_id == (uint64_t)-1) {
+            stream_ctx->stream_id = picoquic_get_next_local_stream_id(client_ctx->cnx, 0);
+            client_log_stream_event(stream_ctx, "assigned stream id");
+        }
+        slipstream_client_stream_ctx_addref(stream_ctx);
+        pthread_mutex_unlock(&client_ctx->stream_lock);
+
+        client_log_stream_event(stream_ctx, "activate stream");
+        picoquic_mark_active_stream(client_ctx->cnx, stream_ctx->stream_id, 1, stream_ctx);
+        slipstream_client_stream_ctx_release(stream_ctx);
     }
 }
 
@@ -411,8 +472,11 @@ void* slipstream_client_poller(void* arg) {
             continue;
         }
 
-        args->stream_ctx->set_active = 1;
-        args->stream_ctx->waiting_for_readable = 0;
+        if (atomic_load_explicit(&args->stream_ctx->closing, memory_order_acquire)) {
+            break;
+        }
+        atomic_store_explicit(&args->stream_ctx->set_active, true, memory_order_release);
+        atomic_store_explicit(&args->stream_ctx->waiting_for_readable, false, memory_order_release);
 
         ret = picoquic_wake_up_network_thread(args->client_ctx->thread_ctx);
         if (ret != 0) {
@@ -423,6 +487,7 @@ void* slipstream_client_poller(void* arg) {
         break;
     }
 
+    slipstream_client_stream_ctx_release(args->stream_ctx);
     free(args);
     pthread_exit(NULL);
 }
@@ -474,7 +539,7 @@ void* slipstream_client_accepter(void* arg) {
             break;
         }
 
-        stream_ctx->set_active = 1;
+        atomic_store_explicit(&stream_ctx->set_active, true, memory_order_release);
 
         int ret = picoquic_wake_up_network_thread(args->thread_ctx);
         if (ret != 0) {
@@ -515,22 +580,35 @@ int slipstream_client_callback(picoquic_cnx_t* cnx,
 
         // printf("[%lu:%d] quic_recv->send %lu bytes\n", stream_id, stream_ctx->fd, length);
         if (length > 0) {
-            ssize_t bytes_sent = send(stream_ctx->fd, bytes, length, MSG_NOSIGNAL);
-            if (bytes_sent < 0) {
-                if (errno == EPIPE) {
-                    /* Connection closed */
-                    client_log_stream_event(stream_ctx, "send: closed stream");
+            size_t remaining = length;
+            const uint8_t* p = bytes;
+            while (remaining > 0) {
+                ssize_t bytes_sent = send(stream_ctx->fd, p, remaining, MSG_NOSIGNAL);
+                if (bytes_sent < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    if (errno == EPIPE || errno == ECONNRESET) {
+                        /* Connection closed */
+                        client_log_stream_event(stream_ctx, "send: closed stream");
+                        (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR);
+                        return 0;
+                    }
+                    if (errno == EAGAIN || (EWOULDBLOCK != EAGAIN && errno == EWOULDBLOCK)) {
+                        /* TODO: this is bad because we don't have a way to backpressure */
+                    }
 
+                    fprintf(stderr, "[stream=%" PRIu64 " fd=%d] send error: %s (%d)\n", stream_id, stream_ctx->fd, strerror(errno), errno);
+                    (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
+                    return 0;
+                }
+                if (bytes_sent == 0) {
+                    client_log_stream_event(stream_ctx, "send: closed stream");
                     (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR);
                     return 0;
                 }
-                if (errno == EAGAIN) {
-                    /* TODO: this is bad because we don't have a way to backpressure */
-                }
-
-                fprintf(stderr, "[stream=%" PRIu64 " fd=%d] send error: %s (%d)\n", stream_id, stream_ctx->fd, strerror(errno), errno);
-                (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
-                return 0;
+                p += bytes_sent;
+                remaining -= (size_t)bytes_sent;
             }
         }
         if (fin_or_event == picoquic_callback_stream_fin) {
@@ -594,19 +672,23 @@ int slipstream_client_callback(picoquic_cnx_t* cnx,
                         printf("[stream=%" PRIu64 " fd=%d] idle: no local bytes (disactivate_count=%u)\n",
                                stream_id, stream_ctx->fd, stream_ctx->empty_disactivate_count);
                     }
-                    if (!stream_ctx->waiting_for_readable) {
-                        stream_ctx->waiting_for_readable = 1;
+                    bool expected_not_waiting = false;
+                    if (atomic_compare_exchange_strong_explicit(
+                            &stream_ctx->waiting_for_readable, &expected_not_waiting, true,
+                            memory_order_acq_rel, memory_order_acquire)) {
                         slipstream_client_poller_args* args = malloc(sizeof(slipstream_client_poller_args));
                         args->fd = stream_ctx->fd;
                         args->cnx = cnx;
                         args->client_ctx = client_ctx;
                         args->stream_ctx = stream_ctx;
+                        slipstream_client_stream_ctx_addref(stream_ctx);
 
                         pthread_t thread;
                         if (pthread_create(&thread, NULL, slipstream_client_poller, args) != 0) {
                             perror("pthread_create() failed for thread1");
+                            slipstream_client_stream_ctx_release(stream_ctx);
                             free(args);
-                            stream_ctx->waiting_for_readable = 0;
+                            atomic_store_explicit(&stream_ctx->waiting_for_readable, false, memory_order_release);
                         }
 #ifdef __APPLE__
                         pthread_setname_np("slipstream_server_poller");
@@ -622,7 +704,7 @@ int slipstream_client_callback(picoquic_cnx_t* cnx,
                     return 0;
                 }
                 if (bytes_read > 0) {
-                    stream_ctx->waiting_for_readable = 0;
+                    atomic_store_explicit(&stream_ctx->waiting_for_readable, false, memory_order_release);
                     stream_ctx->empty_disactivate_count = 0;
                     /* send it in next loop iteration */
                     (void)picoquic_provide_stream_data_buffer(bytes, 0, 0, 1);
@@ -650,7 +732,7 @@ int slipstream_client_callback(picoquic_cnx_t* cnx,
                 (void)picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
                 return 0;
             }
-            stream_ctx->waiting_for_readable = 0;
+            atomic_store_explicit(&stream_ctx->waiting_for_readable, false, memory_order_release);
             stream_ctx->empty_disactivate_count = 0;
         }
         break;
@@ -758,12 +840,18 @@ int picoquic_slipstream_client(int listen_port, struct st_address_t* server_addr
 
     /* Create the QUIC context for the server */
     current_time = picoquic_current_time();
-    // one connection only, freed in slipstream_client_free_context on picoquic close callback
+    // one connection only; client_ctx stores non-owning references to resolver addresses
     slipstream_client_ctx_t client_ctx = {0};
+    client_ctx.listen_sock = -1;
+    if (pthread_mutex_init(&client_ctx.stream_lock, NULL) != 0) {
+        fprintf(stderr, "Could not initialize stream lock\n");
+        return -1;
+    }
     /* Create QUIC context */
     picoquic_quic_t* quic = picoquic_create_and_configure(&config, slipstream_client_callback, &client_ctx, current_time, NULL);
     if (quic == NULL) {
         fprintf(stderr, "Could not create server context\n");
+        pthread_mutex_destroy(&client_ctx.stream_lock);
         return -1;
     }
 
@@ -786,6 +874,8 @@ int picoquic_slipstream_client(int listen_port, struct st_address_t* server_addr
     ret = slipstream_connect(&client_ctx.server_addresses[0].server_address, quic, &cnx, &client_ctx);
     if (ret != 0) {
         fprintf(stderr, "Could not connect to server\n");
+        pthread_mutex_destroy(&client_ctx.stream_lock);
+        picoquic_free(quic);
         return -1;
     }
 
@@ -869,6 +959,8 @@ int picoquic_slipstream_client(int listen_port, struct st_address_t* server_addr
     /* And finish. */
     printf("Client exit, ret = %d\n", ret);
 
+    slipstream_client_free_context(&client_ctx);
+    pthread_mutex_destroy(&client_ctx.stream_lock);
     picoquic_free(quic);
 
     return ret;
