@@ -33,7 +33,7 @@ The client is placed inside the restricted network.
 
 ```shell
 $ slipstream-client \
-  --resolver-address=x.x.x.x:yy \ # Address of public DNS resolver or DHCP assigned resolver
+  --resolver=x.x.x.x:yy \ # Address of public DNS resolver or DHCP assigned resolver
   --domain=test.com
 ```
 
@@ -44,9 +44,9 @@ Assumming you own `test.com`, you should configure the DNS records such that you
 For example, add a NS record for `test.com` pointing to `ns.test.com`.
 Then add an A record on `ns.test.com` pointing to your slipstream server IP.
 
-```
+```dns
 @   IN  NS  ns.test.com.
-ns  IN  A   x.x.x.x:yy ; # Address of slipstream server
+ns  IN  A   x.x.x.x ; # IP address of the slipstream server
 ```
 
 ### Direct connection
@@ -57,10 +57,13 @@ This is a similar trick to using WireGuard on port 53, additionally encoding as 
 
 ```shell
 $ slipstream-client \
-  --congestion-control=bbr \ # Faster better than dcubic in direct connections
-  --resolver-address=x.x.x.x:yy \ # Address of slipstream server
+  --congestion-control=bbr \ # Faster than dcubic in many direct connection setups
+  --resolver=x.x.x.x:yy \ # Address of slipstream server
   --domain=test.com
 ```
+
+You may specify `--resolver` multiple times to use multiple resolvers in parallel.
+All resolver addresses must be from the same IP family (all IPv4 or all IPv6).
 
 ## Example data transfer
 

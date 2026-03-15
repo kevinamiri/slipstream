@@ -19,8 +19,8 @@ The client and server are packaged in different images.
 
 # Usage
 
-The client requires port 5201 to be forwarded to the host.
-The server requires port 53 to be forwarded.
+By default, the client listens for local TCP connections on port `5201`.
+By default, the server listens for DNS packets on port `53`.
 
 ```shell
 $ docker run \
@@ -35,7 +35,7 @@ $ docker run \
 $ docker run \
   --rm \
   -p 5201:5201 \
-  ghcr.io/endpositive/slipstream-server:v0.0.1 \
+  ghcr.io/endpositive/slipstream-client:v0.0.1 \
   --domain=test.com \
   --resolver=1.1.1.1:53
 ```

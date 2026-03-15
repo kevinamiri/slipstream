@@ -17,7 +17,7 @@ To build slipstream locally on debian-based distros, you need the following depe
 * clang (or GCC)
 
 Clone the slipstream repo and its submodules recursively.
-This fetches slipstream, [brotili](https://github.com/google/brotli), [SPCDNS](https://github.com/spc476/SPCDNS), [lua-resty-base-encoding](https://github.com/spacewander/lua-resty-base-encoding), and our [picoquic fork](https://github.com/EndPositive/slipstream-picoquic/).
+This fetches slipstream, [SPCDNS](https://github.com/spc476/SPCDNS), [lua-resty-base-encoding](https://github.com/spacewander/lua-resty-base-encoding), [quick_arg_parser](https://github.com/Dugy/quick_arg_parser), and our [picoquic fork](https://github.com/EndPositive/slipstream-picoquic/).
 
 ```shell
 $ git clone --recurse-submodules https://github.com/EndPositive/slipstream.git
